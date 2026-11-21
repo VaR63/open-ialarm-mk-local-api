@@ -4,6 +4,7 @@ import socket
 import unittest
 from unittest.mock import MagicMock, patch
 
+from open_ialarm_mk_local_api._internal.meian_push_client import MeianPushProtocol
 from open_ialarm_mk_local_api._internal.meian_client import (
     MeianClient,
     _bol,
@@ -401,6 +402,82 @@ class TestMeianClientReceive(unittest.TestCase):
         client._sock = None
         with self.assertRaises(IAlarmMkConnectionError):
             client._receive()
+
+
+# ---------------------------------------------------------------------------
+# MeianPushProtocol — TCP stream buffering
+# ---------------------------------------------------------------------------
+
+class TestMeianPushProtocolBuffering(unittest.TestCase):
+
+    def _make_protocol(self):
+        handler = MagicMock()
+        on_con_lost = MagicMock()
+        on_con_lost.done.return_value = False
+        protocol = MeianPushProtocol("user", handler, on_con_lost)
+        protocol._schedule_keepalive = MagicMock()
+        return protocol, handler, on_con_lost
+
+    def test_fragmented_alarm_frame_is_reassembled(self):
+        """One alarm frame split across callbacks is delivered exactly once."""
+        protocol, handler, _ = self._make_protocol()
+        frame = _build_unsolicited_frame(_UNSOLICITED_XML, b"@alA")
+
+        protocol.data_received(frame[:3])
+        protocol.data_received(frame[3:11])
+        protocol.data_received(frame[11:27])
+        self.assertFalse(handler.called)
+
+        protocol.data_received(frame[27:])
+
+        handler.assert_called_once_with({"Cid": 1132, "Zone": 1})
+        self.assertEqual(protocol._buffer, bytearray())
+
+    def test_coalesced_alarm_frames_are_all_delivered(self):
+        """Multiple complete frames in one TCP callback are all processed."""
+        protocol, handler, _ = self._make_protocol()
+        first = _build_unsolicited_frame(_UNSOLICITED_XML, b"@alA", seq=1)
+        second = _build_unsolicited_frame(_UNSOLICITED_XML, b"!lmX", seq=2)
+
+        protocol.data_received(first + second)
+
+        self.assertEqual(handler.call_count, 2)
+        self.assertEqual(
+            handler.call_args_list[0].args[0],
+            {"Cid": 1132, "Zone": 1},
+        )
+        self.assertEqual(
+            handler.call_args_list[1].args[0],
+            {"Cid": 1132, "Zone": 1},
+        )
+        self.assertEqual(protocol._buffer, bytearray())
+
+    def test_keepalive_and_alarm_can_arrive_together(self):
+        """A keepalive prefix does not hide a following framed alarm event."""
+        protocol, handler, _ = self._make_protocol()
+        frame = _build_unsolicited_frame(_UNSOLICITED_XML, b"@alA")
+
+        protocol.data_received(b"%maI" + frame)
+
+        protocol._schedule_keepalive.assert_called_once_with()
+        handler.assert_called_once_with({"Cid": 1132, "Zone": 1})
+        self.assertEqual(protocol._buffer, bytearray())
+
+    def test_partial_second_frame_remains_buffered(self):
+        """A complete first frame is emitted while the next fragment is retained."""
+        protocol, handler, _ = self._make_protocol()
+        first = _build_unsolicited_frame(_UNSOLICITED_XML, b"@alA", seq=1)
+        second = _build_unsolicited_frame(_UNSOLICITED_XML, b"@alA", seq=2)
+
+        protocol.data_received(first + second[:9])
+
+        handler.assert_called_once()
+        self.assertEqual(protocol._buffer, bytearray(second[:9]))
+
+        protocol.data_received(second[9:])
+
+        self.assertEqual(handler.call_count, 2)
+        self.assertEqual(protocol._buffer, bytearray())
 
 
 # ---------------------------------------------------------------------------
