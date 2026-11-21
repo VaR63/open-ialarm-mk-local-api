@@ -255,7 +255,6 @@ def _convert_dict_to_xml(xmldict: dict) -> etree.Element:
 # ---------------------------------------------------------------------------
 
 class MeianClient:
-    _seq: int = 0
     _timeout: float = 10.0
 
     def __init__(self, host: str, port: int, username: str, password: str, timeout: float = 10.0,
@@ -268,6 +267,7 @@ class MeianClient:
         self._keepalive_idle = keepalive_idle
         self._sock: socket.socket | None = None
         self._token: str | None = None
+        self._seq = 0
         logger.debug("MeianClient created for %s:%d (user=%s, timeout=%.1fs)", host, port, username, timeout)
 
     def _enable_keepalive(self) -> None:
@@ -379,7 +379,8 @@ class MeianClient:
         finally:
             self._sock = None
             self._token = None
-            logger.debug("close_socket: socket closed and token cleared")
+            self._seq = 0
+            logger.debug("close_socket: socket closed and session state cleared")
 
     def is_socket_connected(self) -> bool:
         """Return True if the socket has an active peer connection.
@@ -479,7 +480,9 @@ class MeianClient:
         if self._sock is None:
             raise IAlarmMkConnectionError("Connection error")
         xml = etree.tostring(_convert_dict_to_xml(root), pretty_print=False)
-        self._seq += 1
+        # The wire protocol reserves exactly four decimal digits for the
+        # request sequence. Wrap after 9999 so the frame layout never shifts.
+        self._seq = (self._seq % 9999) + 1
         message = b"@ieM%04d%04d0000%s%04d" % (len(xml), self._seq, _xor(xml), self._seq)
         logger.debug("_send: seq=%d xml_len=%d frame_len=%d", self._seq, len(xml), len(message))
         self._sock.send(message)
