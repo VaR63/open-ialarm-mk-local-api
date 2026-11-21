@@ -183,6 +183,43 @@ def _make_client() -> MeianClient:
     return client
 
 
+# ---------------------------------------------------------------------------
+# MeianClient._send() — four-digit sequence rollover
+# ---------------------------------------------------------------------------
+
+class TestMeianClientSend(unittest.TestCase):
+
+    def test_send_sequence_wraps_after_9999(self):
+        """The four-digit wire sequence wraps from 9999 back to 0001."""
+        client = _make_client()
+        client._seq = 9998
+        root = _create(
+            "/Root/Host/GetAlarmStatus",
+            {"DevStatus": None},
+        )
+
+        client._send(root)
+        client._send(root)
+
+        first_frame = client._sock.send.call_args_list[0].args[0]
+        second_frame = client._sock.send.call_args_list[1].args[0]
+
+        self.assertEqual(first_frame[8:12], b"9999")
+        self.assertEqual(first_frame[-4:], b"9999")
+        self.assertEqual(second_frame[8:12], b"0001")
+        self.assertEqual(second_frame[-4:], b"0001")
+        self.assertEqual(client._seq, 1)
+
+    def test_close_socket_resets_sequence(self):
+        """A new authenticated TCP session starts with a fresh sequence."""
+        client = _make_client()
+        client._seq = 4321
+
+        client.close_socket()
+
+        self.assertEqual(client._seq, 0)
+
+
 class TestMeianClientReceive(unittest.TestCase):
 
     def test_receive_small_payload_in_one_chunk(self):
