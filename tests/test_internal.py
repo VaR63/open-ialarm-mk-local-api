@@ -27,8 +27,14 @@ from open_ialarm_mk_local_api.exceptions.login_error import IAlarmMkLoginError
 # ---------------------------------------------------------------------------
 
 def _build_frame(xml: bytes, seq: int = 1) -> bytes:
-    """Return a complete ``@ieM`` framed message for *xml*."""
+    """Return a complete @ieM framed message for xml."""
     return b"@ieM%04d%04d0000%s%04d" % (len(xml), seq, _xor(xml), seq)
+
+
+def _build_unsolicited_frame(xml: bytes, magic: bytes, seq: int = 0) -> bytes:
+    """Return a complete unsolicited alarm frame."""
+    payload = _xor(xml) if magic == b"@alA" else xml
+    return magic + (b"%04d%04d0000%s%04d" % (len(xml), seq, payload, seq))
 
 
 def _chunked_recv(data: bytes, chunk_size: int):
@@ -158,6 +164,12 @@ class TestXmlread(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 _SIMPLE_XML = b"<Root><Host><GetAlarmStatus><DevStatus>S32,0,0|0</DevStatus></GetAlarmStatus></Host></Root>"
+_UNSOLICITED_XML = (
+    b"<Root><Host><Alarm>"
+    b"<Cid>S32,0,0|1132</Cid>"
+    b"<Zone>S32,0,0|1</Zone>"
+    b"</Alarm></Host></Root>"
+)
 
 # A large XML that exceeds 1024 bytes (simulates MK7 login response).
 # All values use valid Meian type tags so _xmlread can decode them.
@@ -221,6 +233,93 @@ class TestMeianClientSend(unittest.TestCase):
 
 
 class TestMeianClientReceive(unittest.TestCase):
+
+    def test_receive_forwards_xor_unsolicited_alarm_then_returns_response(self):
+        """@alA is decoded, forwarded, and does not consume the command response."""
+        callback = MagicMock()
+        client = MeianClient(
+            "192.168.1.1",
+            8000,
+            "user",
+            "pass",
+            on_unsolicited=callback,
+        )
+        client._sock = MagicMock(spec=socket.socket)
+
+        event_frame = _build_unsolicited_frame(_UNSOLICITED_XML, b"@alA")
+        response_frame = _build_frame(_SIMPLE_XML)
+        client._sock.recv.side_effect = [
+            event_frame[:16],
+            event_frame[16:],
+            response_frame[:16],
+            response_frame[16:],
+        ]
+
+        result = client._receive()
+
+        callback.assert_called_once_with({"Cid": 1132, "Zone": 1})
+        self.assertEqual(
+            result["Root"]["Host"]["GetAlarmStatus"]["DevStatus"],
+            0,
+        )
+
+    def test_receive_forwards_plain_unsolicited_alarm_then_returns_response(self):
+        """!lmX is decoded, forwarded, and does not consume the command response."""
+        callback = MagicMock()
+        client = MeianClient(
+            "192.168.1.1",
+            8000,
+            "user",
+            "pass",
+            on_unsolicited=callback,
+        )
+        client._sock = MagicMock(spec=socket.socket)
+
+        event_frame = _build_unsolicited_frame(_UNSOLICITED_XML, b"!lmX")
+        response_frame = _build_frame(_SIMPLE_XML)
+        client._sock.recv.side_effect = [
+            event_frame[:16],
+            event_frame[16:],
+            response_frame[:16],
+            response_frame[16:],
+        ]
+
+        result = client._receive()
+
+        callback.assert_called_once_with({"Cid": 1132, "Zone": 1})
+        self.assertEqual(
+            result["Root"]["Host"]["GetAlarmStatus"]["DevStatus"],
+            0,
+        )
+
+    def test_unsolicited_callback_error_does_not_break_command_response(self):
+        """A consumer callback failure must not corrupt request/response handling."""
+        callback = MagicMock(side_effect=RuntimeError("consumer failed"))
+        client = MeianClient(
+            "192.168.1.1",
+            8000,
+            "user",
+            "pass",
+            on_unsolicited=callback,
+        )
+        client._sock = MagicMock(spec=socket.socket)
+
+        event_frame = _build_unsolicited_frame(_UNSOLICITED_XML, b"@alA")
+        response_frame = _build_frame(_SIMPLE_XML)
+        client._sock.recv.side_effect = [
+            event_frame[:16],
+            event_frame[16:],
+            response_frame[:16],
+            response_frame[16:],
+        ]
+
+        result = client._receive()
+
+        callback.assert_called_once()
+        self.assertEqual(
+            result["Root"]["Host"]["GetAlarmStatus"]["DevStatus"],
+            0,
+        )
 
     def test_receive_small_payload_in_one_chunk(self):
         """Standard single-chunk recv still works after the fix."""
