@@ -51,6 +51,78 @@ class TestIAlarmMkClient(unittest.IsolatedAsyncioTestCase):
         callback.assert_called_once_with({"Cid": 1132, "Zone": 1})
         await client.disconnect()
 
+    async def test_async_unsolicited_callback_runs_on_event_loop(self):
+        received = asyncio.Event()
+        events = []
+        loop = asyncio.get_running_loop()
+
+        async def callback(event):
+            await asyncio.sleep(0)
+            events.append((event, asyncio.get_running_loop()))
+            received.set()
+
+        client = IAlarmMkClient(
+            "host", 1234, "user", "pass",
+            keepalive_interval=None, on_unsolicited=callback,
+        )
+        client._event_loop = loop
+        event = {"Cid": 1132, "Zone": 1}
+
+        await asyncio.to_thread(client._dispatch_unsolicited, event)
+        await asyncio.wait_for(received.wait(), 1)
+
+        self.assertEqual(events, [(event, loop)])
+
+    @patch("open_ialarm_mk_local_api.ialarmmk_client.MeianClient")
+    async def test_unsolicited_after_implicit_reconnect(self, meian_client_cls):
+        backend = MagicMock()
+        meian_client_cls.return_value = backend
+        received = asyncio.Event()
+        events = []
+        loop = asyncio.get_running_loop()
+
+        def callback(event):
+            events.append((event, asyncio.get_running_loop()))
+            received.set()
+
+        client = IAlarmMkClient(
+            "host", 1234, "user", "pass",
+            keepalive_interval=None, on_unsolicited=callback,
+        )
+        event = {"Cid": 1132, "Zone": 1}
+        low_level_callback = meian_client_cls.call_args.kwargs["on_unsolicited"]
+
+        backend.get_alarm_status.side_effect = [
+            IAlarmMkConnectionError("not connected"), {"DevStatus": 1}
+        ]
+        backend.login.side_effect = lambda: low_level_callback(event)
+
+        status = await client.get_status()
+        await asyncio.wait_for(received.wait(), 1)
+
+        self.assertEqual(status.status, AlarmStatusEnum.DISARMED)
+        backend.login.assert_called_once_with()
+        self.assertIs(client._event_loop, loop)
+        self.assertEqual(events, [(event, loop)])
+
+    async def test_async_unsolicited_callback_failure_is_logged(self):
+        async def callback(event):
+            raise RuntimeError("consumer failed")
+
+        client = IAlarmMkClient(
+            "host", 1234, "user", "pass",
+            keepalive_interval=None, on_unsolicited=callback,
+        )
+        client._event_loop = asyncio.get_running_loop()
+        with self.assertLogs("open_ialarm_mk_local_api.ialarmmk_client", level="ERROR") as logs:
+            await asyncio.to_thread(client._dispatch_unsolicited, {})
+            # Drain the scheduled invocation and its completion callback.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        self.assertIn("Unsolicited event callback failed", "\n".join(logs.output))
+        self.assertFalse(client._unsolicited_tasks)
+
     @patch("open_ialarm_mk_local_api.ialarmmk_client.MeianClient")
     async def test_context_manager_connects_and_disconnects(self, meian_client_cls):
         backend = MagicMock()

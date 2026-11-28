@@ -1,6 +1,7 @@
 import asyncio
+import inspect
 import logging
-from typing import Callable
+from typing import Awaitable, Callable
 
 from ._internal.meian_client import MeianClient
 from .enums.alarm_status_enum import AlarmStatusEnum
@@ -48,7 +49,7 @@ class IAlarmMkClient:
         password: str,
         timeout: float = 10.0,
         keepalive_interval: int | None = _KEEPALIVE_DEFAULT,
-        on_unsolicited: Callable[[dict], None] | None = None,
+        on_unsolicited: Callable[[dict], None | Awaitable[None]] | None = None,
     ):
         self._host = host
         self._port = port
@@ -57,6 +58,7 @@ class IAlarmMkClient:
         self._keepalive_task: asyncio.Task | None = None
         self._on_unsolicited = on_unsolicited
         self._event_loop: asyncio.AbstractEventLoop | None = None
+        self._unsolicited_tasks: set[asyncio.Future] = set()
         self._client = MeianClient(
             host,
             port,
@@ -104,7 +106,30 @@ class IAlarmMkClient:
         if loop is None or loop.is_closed():
             logger.debug("_dispatch_unsolicited: event loop unavailable, dropping event")
             return
-        loop.call_soon_threadsafe(self._on_unsolicited, event)
+        loop.call_soon_threadsafe(self._invoke_unsolicited, event)
+
+    def _invoke_unsolicited(self, event: dict) -> None:
+        """Invoke a synchronous or asynchronous callback on the event loop."""
+        if self._on_unsolicited is None:
+            return
+        try:
+            result = self._on_unsolicited(event)
+            if inspect.isawaitable(result):
+                task = asyncio.ensure_future(result)
+                self._unsolicited_tasks.add(task)
+                task.add_done_callback(self._unsolicited_done)
+        except Exception:
+            logger.exception("Unsolicited event callback failed")
+
+    def _unsolicited_done(self, task: asyncio.Future) -> None:
+        """Release completed callbacks and report asynchronous failures."""
+        self._unsolicited_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.exception("Unsolicited event callback failed")
 
     # ------------------------------------------------------------------
     # Keepalive
@@ -162,6 +187,7 @@ class IAlarmMkClient:
         """
         async with self._lock:
             loop = asyncio.get_running_loop()
+            self._event_loop = loop
             try:
                 return await loop.run_in_executor(None, fn, *args)
             except IAlarmMkConnectionError:

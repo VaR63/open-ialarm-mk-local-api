@@ -93,9 +93,8 @@ class MeianPushProtocol(asyncio.Protocol):
             if len(self._buffer) < 16:
                 return
 
-            try:
-                payload_len = int(bytes(self._buffer[4:8]))
-            except ValueError:
+            length_field = bytes(self._buffer[4:8])
+            if not length_field.isdigit():
                 logger.warning(
                     "data_received: invalid payload length in %s frame",
                     head,
@@ -103,6 +102,7 @@ class MeianPushProtocol(asyncio.Protocol):
                 self._buffer.clear()
                 self._close()
                 return
+            payload_len = int(length_field)
 
             frame_len = 16 + payload_len + 4
             if len(self._buffer) < frame_len:
@@ -146,7 +146,7 @@ class MeianPushProtocol(asyncio.Protocol):
                 return
             event = _select(resp, HOST_ALARM)
             logger.debug("_handle_frame: alarm event via @ieM frame: %s", event)
-            self._handler(event)
+            self._dispatch(event)
             return
 
         if head == b"@alA":
@@ -162,7 +162,7 @@ class MeianPushProtocol(asyncio.Protocol):
                 return
             event = _select(resp, HOST_ALARM)
             logger.debug("_handle_frame: alarm event via @alA frame: %s", event)
-            self._handler(event)
+            self._dispatch(event)
             return
 
         if head == b"!lmX":
@@ -178,8 +178,15 @@ class MeianPushProtocol(asyncio.Protocol):
                 return
             event = _select(resp, HOST_ALARM)
             logger.debug("_handle_frame: alarm event via !lmX frame: %s", event)
-            self._handler(event)
+            self._dispatch(event)
             return
+
+    def _dispatch(self, event) -> None:
+        """A failing event handler must not interrupt TCP frame processing."""
+        try:
+            self._handler(event)
+        except Exception:
+            logger.exception("_handle_frame: push event handler raised")
 
     def connection_lost(self, exc) -> None:
         """Called by asyncio when the connection is closed or dropped."""

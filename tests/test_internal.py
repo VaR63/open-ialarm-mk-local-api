@@ -418,6 +418,46 @@ class TestMeianPushProtocolBuffering(unittest.TestCase):
         protocol._schedule_keepalive = MagicMock()
         return protocol, handler, on_con_lost
 
+    def test_handler_exception_does_not_drop_next_frame(self):
+        """A failing handler cannot discard other frames in the same read."""
+        for magic in (b"@ieM", b"@alA", b"!lmX"):
+            with self.subTest(magic=magic):
+                protocol, handler, on_con_lost = self._make_protocol()
+                handler.side_effect = [RuntimeError("consumer failed"), None]
+                first = (
+                    _build_frame(_UNSOLICITED_XML)
+                    if magic == b"@ieM"
+                    else _build_unsolicited_frame(_UNSOLICITED_XML, magic)
+                )
+                second = _build_unsolicited_frame(_UNSOLICITED_XML, b"@alA")
+                with self.assertLogs(
+                    "open_ialarm_mk_local_api._internal.meian_push_client",
+                    level="ERROR",
+                ):
+                    protocol.data_received(first + second)
+
+                self.assertEqual(handler.call_count, 2)
+                self.assertEqual(protocol._buffer, bytearray())
+                on_con_lost.set_result.assert_not_called()
+
+    def test_invalid_length_fields_close_connection(self):
+        """Only four ASCII digits are accepted as a wire payload length."""
+        for field in (b"-004", b"+004", b" 004", b"004 ", b"0_04", b"abcd"):
+            with self.subTest(field=field):
+                protocol, handler, on_con_lost = self._make_protocol()
+                transport = MagicMock()
+                transport.is_closing.return_value = False
+                protocol._transport = transport
+                with self.assertLogs(
+                    "open_ialarm_mk_local_api._internal.meian_push_client",
+                    level="WARNING",
+                ):
+                    protocol.data_received(b"@alA" + field + b"0" * 8 + b"ABCD")
+                transport.close.assert_called_once_with()
+                on_con_lost.set_result.assert_called_once_with(True)
+                handler.assert_not_called()
+                self.assertEqual(protocol._buffer, bytearray())
+
     def test_fragmented_alarm_frame_is_reassembled(self):
         """One alarm frame split across callbacks is delivered exactly once."""
         protocol, handler, _ = self._make_protocol()

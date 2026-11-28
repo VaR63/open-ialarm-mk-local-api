@@ -111,7 +111,7 @@ asyncio.run(main())
 | **`password`** | `str` | *required* | Login password |
 | `timeout` | `float` | `10.0` | Socket timeout in seconds |
 | `keepalive_interval` | `int \| None` | `30` | Seconds between keepalive polls; `None` to disable |
-| `on_unsolicited` | `Callable[[dict], None] \| None` | `None` | Optional callback for alarm events received on the command socket |
+| `on_unsolicited` | `Callable[[dict], None \| Awaitable[None]] \| None` | `None` | Optional synchronous or asynchronous callback for alarm events received on the command socket |
 
 ---
 
@@ -151,7 +151,9 @@ client = IAlarmMkClient(
 await client.connect()
 ```
 
-The async client dispatches this callback on its asyncio event loop.
+The async client dispatches this callback on its asyncio event loop. Both normal
+functions and async functions (or callbacks returning an awaitable) are supported.
+Callback exceptions are logged without interrupting command-response handling.
 
 ---
 
